@@ -94,8 +94,8 @@ These steps follow Shopify's [Shop Configuration Guide](https://shopify.dev/docs
 ### 2. Clone and configure
 
 ```bash
-git clone https://github.com/kirbyfike/shop-pay-basic-example.git
-cd shop-pay-basic-example
+git clone https://github.com/kirbyfike/Shop-Pay-Example.git
+cd Shop-Pay-Example
 ```
 
 Open `index.html` and fill in the config block:
