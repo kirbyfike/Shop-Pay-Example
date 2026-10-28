@@ -9,7 +9,7 @@ It shows the whole client-side flow:
 - building a payment request (line items, subtotal, tax, total)
 - handling the session events (session creation, address changes, shipping changes, payment confirmation, completion and failure)
 
-> ⚠️ This is a **frontend example only**. It calls two backend endpoints that you must build yourself, because the Storefront API calls must run on a server. Sketches of both are under [Build the backend](#4-build-the-backend).
+> ⚠️ **Quick demo: the API calls run in the browser.** To keep this example to a single file, `index.html` calls the Storefront API directly from the frontend. That puts your Storefront token in the page, where anyone can read it, and lets a buyer change prices before they pay. Use it only against a test store. **Before production, move these calls to your server.** See [Moving to production: put the API calls on a server](#4-moving-to-production-put-the-api-calls-on-a-server).
 
 ---
 
@@ -21,7 +21,7 @@ It shows the whole client-side flow:
   - [1. Configure your Shopify store](#1-configure-your-shopify-store)
   - [2. Clone and configure](#2-clone-and-configure)
   - [3. Run it locally](#3-run-it-locally)
-  - [4. Build the backend](#4-build-the-backend)
+  - [4. Moving to production: put the API calls on a server](#4-moving-to-production-put-the-api-calls-on-a-server)
 - [Event reference](#event-reference)
 - [Testing](#testing)
 - [Going to production](#going-to-production)
@@ -33,27 +33,27 @@ It shows the whole client-side flow:
 ## How it works
 
 ```
- Browser (index.html)                Your server                     Shopify
- ────────────────────                ───────────                     ───────
+ Browser (index.html)                                      Shopify
+ ────────────────────                                      ───────
  Buyer clicks Shop Pay
-   └─ "sessionrequested" ─────────▶  POST /api/shop-pay/session
-                                       └─ shopPayPaymentRequest ───▶  Storefront API
-                                          SessionCreate
-   completeSessionRequest() ◀──────  { token, checkoutUrl, sourceIdentifier }
+   └─ "sessionrequested"
+        └─ shopPayPaymentRequestSessionCreate ──────────▶  Storefront API
+   completeSessionRequest() ◀──── { token, checkoutUrl, sourceIdentifier }
 
  Buyer picks address / shipping
    └─ "shippingaddresschanged"
-   └─ "deliverymethodchanged"        (handled in the browser in this example;
-      → return an updated request     in production, validate on your server)
+   └─ "deliverymethodchanged"
+      → return an updated payment request
 
  Buyer clicks "Pay now"
-   └─ "paymentconfirmationrequested" ▶ POST /api/shop-pay/submit
-                                       └─ shopPayPaymentRequest ───▶  Storefront API
-                                          SessionSubmit
+   └─ "paymentconfirmationrequested"
+        └─ shopPayPaymentRequestSessionSubmit ──────────▶  Storefront API
    completePaymentConfirmationRequest()
 
    └─ "paymentcomplete" ───▶ redirect to /thank-you
 ```
+
+In production, the two Storefront API calls move to your server. The browser calls your endpoints, and your server calls Shopify.
 
 ---
 
@@ -62,7 +62,7 @@ It shows the whole client-side flow:
 - A Shopify store with **Shop Pay Wallet** access (part of Commerce Components by Shopify). Per Shopify, the Shop Pay Wallet API can't be used on an existing store, so create a new store for this integration.
 - **Shopify Payments** fully set up, with **test mode** turned on while you develop.
 - The **Shop** sales channel installed on the store.
-- Storefront API credentials for your backend (the Shop Pay Wallet plan includes a pre-configured custom app).
+- A Storefront API access token (the Shop Pay Wallet plan includes a pre-configured custom app).
 - Any static file server for local development (examples below use Node's `npx`, Python also works).
 
 ---
@@ -89,7 +89,7 @@ These steps follow Shopify's [Shop Configuration Guide](https://shopify.dev/docs
 
 3. **Turn on test mode** in Shopify Payments so no real charges are made.
 
-4. **Get Storefront API credentials** for your backend. Keep them on the server and never ship them in `index.html`.
+4. **Get a Storefront API access token.** In this demo it goes in `index.html`, where anyone who opens the page can read it. In production it lives on your server.
 
 ### 2. Clone and configure
 
@@ -104,8 +104,10 @@ Open `index.html` and fill in the config block:
 const SHOP_ID   = 1;               // your numeric Shop ID
 const CLIENT_ID = "[REPLACE-ME]";  // your Shop Pay Client ID
 
-const SESSION_ENDPOINT = "/api/shop-pay/session";
-const SUBMIT_ENDPOINT  = "/api/shop-pay/submit";
+// ⚠️ Demo only. Move these to your server in production.
+const STORE_DOMAIN     = "[REPLACE-ME].myshopify.com";
+const STOREFRONT_TOKEN = "[REPLACE-ME]";
+const API_VERSION      = "2026-10";
 ```
 
 The example product ($25.00), the shipping options, and the delivery dates in `SHIPPING_OPTIONS` are all hard-coded placeholders. Update the dates to be in the future, or the shipping options may look stale.
@@ -122,16 +124,26 @@ python3 -m http.server 8080
 
 Then open `http://localhost:3000` (or `:8080`).
 
-With `debug: true` set, the SDK logs to the browser console. The button and login should render. Clicking the button will fail until your backend endpoints exist.
+With `debug: true` set, the SDK logs to the browser console. The button and login should render. Clicking the button runs the full checkout against your store in test mode.
 
 > To test on a real phone or share a link, use a tunnel (such as ngrok or Cloudflare Tunnel) and add the tunnel's origin to the **Domains allow list**.
 
-### 4. Build the backend
+### 4. Moving to production: put the API calls on a server
 
-The page calls two endpoints. Each one calls a Storefront API mutation from your server.
+In this demo, `index.html` sends both Storefront API mutations straight from the browser. That's fine for trying things out on a test store. **It isn't safe for production**, for two reasons:
+
+- **Your token is public.** Anyone can open dev tools and copy `STOREFRONT_TOKEN`.
+- **Buyers control the price.** The browser builds the payment request it submits, so a buyer could edit the totals before paying.
+
+For production, move each mutation into a server endpoint, and change the page to call your endpoints instead of Shopify:
+
+| Browser event | Server endpoint | Storefront API mutation |
+| --- | --- | --- |
+| `sessionrequested` | `POST /api/shop-pay/session` | `shopPayPaymentRequestSessionCreate` |
+| `paymentconfirmationrequested` | `POST /api/shop-pay/submit` | `shopPayPaymentRequestSessionSubmit` |
 
 **Endpoint:** `https://{your-store}.myshopify.com/api/2026-10/graphql.json`
-**Auth header:** `Shopify-Storefront-Private-Token: <your private Storefront token>`
+**Auth header (server-side):** `Shopify-Storefront-Private-Token: <your private Storefront token>`
 
 > The mutation signatures below are for Storefront API **2026-10** and later. In earlier versions, `shopPayPaymentRequestSessionCreate` also requires a `paymentRequest` argument. Check the [GraphQL pre-payment docs](https://shopify.dev/docs/api/commerce-components/pay/graphql-pre-payment) for your version.
 
@@ -236,10 +248,10 @@ These are the events `index.html` handles:
 
 | Event | When it fires | What the example does |
 | --- | --- | --- |
-| `sessionrequested` | The buyer clicks the button or authenticates | POSTs to `SESSION_ENDPOINT`, then calls `completeSessionRequest()` |
+| `sessionrequested` | The buyer clicks the button or authenticates | Calls `shopPayPaymentRequestSessionCreate`, then calls `completeSessionRequest()` |
 | `shippingaddresschanged` | The buyer picks or changes an address | Offers shipping options for US addresses only, and returns an error for other countries |
 | `deliverymethodchanged` | The buyer picks a shipping method | Adds the shipping line and recalculates the total |
-| `paymentconfirmationrequested` | The buyer clicks **Pay now** | POSTs to `SUBMIT_ENDPOINT`, then calls `completePaymentConfirmationRequest()` |
+| `paymentconfirmationrequested` | The buyer clicks **Pay now** | Calls `shopPayPaymentRequestSessionSubmit`, then calls `completePaymentConfirmationRequest()` |
 | `paymentcomplete` | The payment succeeded | Closes the session and redirects to `/thank-you` |
 | `paymentattemptfailed` | The payment was declined | Logs the reason and keeps the window open so the buyer can retry |
 | `windowclosed` | The buyer closed the Shop Pay window | Logs it |
@@ -260,6 +272,7 @@ Every `complete*` call must return a **complete** updated payment request, and i
 
 ## Going to production
 
+- [ ] Move the Storefront API calls and the token from `index.html` to your server (see [step 4](#4-moving-to-production-put-the-api-calls-on-a-server)).
 - [ ] Remove `debug: true` from `configure()`.
 - [ ] Add your production origins to the **Domains allow list**.
 - [ ] Calculate tax and shipping on the **server**, not with the hard-coded values in this example.
@@ -277,7 +290,8 @@ Every `complete*` call must return a **complete** updated payment request, and i
 | The button or login doesn't render | Your origin isn't in the **Domains allow list**, `SHOP_ID` or `CLIENT_ID` is wrong, or you opened the page as a `file://` URL |
 | `window.ShopPay` is undefined | The SDK `<script>` didn't load. Check that it's in `<head>` and that your CSP allows it |
 | You can't find the Shop Pay configuration | The **Shop** sales channel isn't installed. Reinstall it from the Shopify App Store |
-| The checkout window hangs, then errors | A `complete*` call wasn't made within 15 seconds, or your backend endpoint returned an error |
+| The checkout window hangs, then errors | A `complete*` call wasn't made within 15 seconds, or the Storefront API call failed. Check the console for `Session create failed` or `Payment submit failed` |
+| The Storefront API request is blocked or returns 401/403 | `STORE_DOMAIN` or `STOREFRONT_TOKEN` is wrong, or your token can't be used from the browser. Move the calls to a server ([step 4](#4-moving-to-production-put-the-api-calls-on-a-server)) |
 
 See also Shopify's [Troubleshooting guide](https://shopify.dev/docs/api/commerce-components/pay/troubleshooting-guide).
 

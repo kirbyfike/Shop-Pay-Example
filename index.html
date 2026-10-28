@@ -41,9 +41,13 @@
     const SHOP_ID   = 1;               // REPLACE: numeric shop ID (Admin API `shop.id`)
     const CLIENT_ID = "[REPLACE-ME]";  // REPLACE: Shop Pay Client ID (UUID) from the Shop sales channel
 
-    // Your backend endpoints (they call the Storefront API mutations)
-    const SESSION_ENDPOINT = "/api/shop-pay/session"; // -> shopPayPaymentRequestSessionCreate
-    const SUBMIT_ENDPOINT  = "/api/shop-pay/submit";  // -> shopPayPaymentRequestSessionSubmit
+    // Storefront API access.
+    // ⚠️ DEMO ONLY: these calls run in the browser so the example works as a single file.
+    // Anyone who opens this page can read STOREFRONT_TOKEN. In production, move the
+    // Storefront API calls below to your server and keep the token there.
+    const STORE_DOMAIN     = "[REPLACE-ME].myshopify.com"; // REPLACE: your store's myshopify domain
+    const STOREFRONT_TOKEN = "[REPLACE-ME]";               // REPLACE: Storefront API access token
+    const API_VERSION      = "2026-10";
 
     const CURRENCY = "USD";
     const money = (amount) => ({ amount, currencyCode: CURRENCY });
@@ -95,20 +99,51 @@
       paymentRequest: initialPaymentRequest,
     });
 
-    // Small helper for POSTing JSON to your backend
-    const postJSON = (url, body) =>
-      fetch(url, {
+    // Small helper for calling the Storefront API (move to your server in production)
+    const storefront = (query, variables) =>
+      fetch(`https://${STORE_DOMAIN}/api/${API_VERSION}/graphql.json`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Storefront-Access-Token": STOREFRONT_TOKEN,
+        },
+        body: JSON.stringify({ query, variables }),
       }).then((r) => r.json());
+
+    const SESSION_CREATE_MUTATION = `
+      mutation shopPayPaymentRequestSessionCreate($sourceIdentifier: String!) {
+        shopPayPaymentRequestSessionCreate(sourceIdentifier: $sourceIdentifier) {
+          shopPayPaymentRequestSession { token sourceIdentifier checkoutUrl }
+          userErrors { field message }
+        }
+      }`;
+
+    const SESSION_SUBMIT_MUTATION = `
+      mutation shopPayPaymentRequestSessionSubmit(
+        $token: String!, $paymentRequest: ShopPayPaymentRequestInput!, $idempotencyKey: String!
+      ) {
+        shopPayPaymentRequestSessionSubmit(
+          token: $token, paymentRequest: $paymentRequest, idempotencyKey: $idempotencyKey
+        ) {
+          paymentRequestReceipt { token processingStatusType }
+          userErrors { field message }
+        }
+      }`;
 
     // ---- 4. EVENTS ---------------------------------------------------------
 
-    // Customer clicked the button / authenticated -> create session on server
+    // Customer clicked the button / authenticated -> create session
     session.addEventListener("sessionrequested", async () => {
-      const { token, checkoutUrl, sourceIdentifier } =
-        await postJSON(SESSION_ENDPOINT, { payment_request: initialPaymentRequest });
+      // sourceIdentifier must be unique across all orders (use your cart/order ID in production)
+      const { data } = await storefront(SESSION_CREATE_MUTATION, {
+        sourceIdentifier: `order-${crypto.randomUUID()}`,
+      });
+      const result = data.shopPayPaymentRequestSessionCreate;
+      if (result.userErrors.length) {
+        console.error("Session create failed:", result.userErrors);
+        return;
+      }
+      const { token, checkoutUrl, sourceIdentifier } = result.shopPayPaymentRequestSession;
       session.completeSessionRequest({ token, checkoutUrl, sourceIdentifier });
     });
 
@@ -143,14 +178,17 @@
       session.completeDeliveryMethodChange({ updatedPaymentRequest });
     });
 
-    // Customer clicked "Pay now" -> validate + submit on server
+    // Customer clicked "Pay now" -> submit (in production: re-validate totals on your server first)
     session.addEventListener("paymentconfirmationrequested", async () => {
       try {
-        const data = await postJSON(SUBMIT_ENDPOINT, {
+        const { data, errors } = await storefront(SESSION_SUBMIT_MUTATION, {
           token: session.token,
-          payment_request: session.paymentRequest,
+          paymentRequest: session.paymentRequest,
+          idempotencyKey: crypto.randomUUID(),
         });
-        if (data.errors) {
+        const userErrors = data?.shopPayPaymentRequestSessionSubmit?.userErrors ?? [];
+        if (errors || userErrors.length) {
+          console.error("Payment submit failed:", errors || userErrors);
           session.completePaymentConfirmationRequest({
             errors: [{ type: "generalError", message: "Something went wrong. Please try again." }],
           });
