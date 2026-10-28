@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shop Pay – Basic Example</title>
+
+  <!-- Shop Pay Wallet JS SDK (must be in <head>) -->
+  <script src="https://cdn.shopify.com/shopifycloud/shop-js/shop-pay-payment-request.js"></script>
+
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; }
+    .row { display: flex; justify-content: space-between; margin: 6px 0; }
+    .checkout-stack { display: flex; flex-direction: column; }
+    .checkout-stack label { margin-top: 16px; }
+    input[type=email] { width: 100%; padding: 10px; margin: 8px 0 0; box-sizing: border-box; }
+    #shop-pay-login-container { order: 1; }
+    #shop-pay-button-container { order: 2; display: block; width: 100%; margin-top: 12px; }
+    shop-pay-payment-request-button { display: block; --shop-pay-button-width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Checkout</h1>
+
+  <div class="row"><span>Example Product × 1</span><span>$25.00</span></div>
+  <div class="row"><strong>Subtotal</strong><strong>$25.00</strong></div>
+
+  <div class="checkout-stack">
+    <!-- Shop Pay Login (email recognition) -->
+    <label for="email-input">Email</label>
+    <div id="shop-pay-login-container">
+      <input type="email" id="email-input" placeholder="you@example.com" />
+    </div>
+
+    <!-- Shop Pay button, directly under the email field -->
+    <div id="shop-pay-button-container"></div>
+  </div>
+
+  <script>
+    // ---- 1. CONFIG ---------------------------------------------------------
+    const SHOP_ID   = 1;               // REPLACE: numeric shop ID (Admin API `shop.id`)
+    const CLIENT_ID = "[REPLACE-ME]";  // REPLACE: Shop Pay Client ID (UUID) from the Shop sales channel
+
+    // Your backend endpoints (they call the Storefront API mutations)
+    const SESSION_ENDPOINT = "/api/shop-pay/session"; // -> shopPayPaymentRequestSessionCreate
+    const SUBMIT_ENDPOINT  = "/api/shop-pay/submit";  // -> shopPayPaymentRequestSessionSubmit
+
+    const CURRENCY = "USD";
+    const money = (amount) => ({ amount, currencyCode: CURRENCY });
+
+    const SHIPPING_OPTIONS = [
+      { label: "Standard", code: "STANDARD", amount: money(5.00),
+        minDeliveryDate: "2026-11-03", maxDeliveryDate: "2026-11-07" },
+      { label: "Express",  code: "EXPRESS",  amount: money(15.00),
+        minDeliveryDate: "2026-10-30", maxDeliveryDate: "2026-11-01" },
+    ];
+
+    const SUBTOTAL = 25.00;
+    const TAX      = 0.00; // Calculate on your server in a real integration
+
+    // ---- 2. CONFIGURE SDK + RENDER COMPONENTS -----------------------------
+    window.ShopPay.PaymentRequest.configure({
+      shopId: SHOP_ID,
+      clientId: CLIENT_ID,
+      debug: true,               // remove in production
+      discountCodeField: false,  // hides discount field so no discount handler is needed
+    });
+
+    window.ShopPay.PaymentRequest.createButton().render("#shop-pay-button-container");
+    window.ShopPay.PaymentRequest.createLogin({ emailInputId: "email-input" })
+      .render("#shop-pay-login-container");
+
+    // ---- 3. BUILD THE PAYMENT REQUEST -------------------------------------
+    const initialPaymentRequest = window.ShopPay.PaymentRequest.build({
+      lineItems: [{
+        label: "Example Product",
+        sku: "example-sku",
+        quantity: 1,
+        requiresShipping: true,
+        originalItemPrice: money(25.00),
+        finalItemPrice:    money(25.00),
+        originalLinePrice: money(25.00),
+        finalLinePrice:    money(25.00),
+      }],
+      discountCodes: [],
+      deliveryMethods: [],
+      subtotal: money(SUBTOTAL),
+      totalTax: money(TAX),
+      total:    money(SUBTOTAL + TAX),
+      presentmentCurrency: CURRENCY,
+      locale: "en",
+    });
+
+    const session = window.ShopPay.PaymentRequest.createSession({
+      paymentRequest: initialPaymentRequest,
+    });
+
+    // Small helper for POSTing JSON to your backend
+    const postJSON = (url, body) =>
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json());
+
+    // ---- 4. EVENTS ---------------------------------------------------------
+
+    // Customer clicked the button / authenticated -> create session on server
+    session.addEventListener("sessionrequested", async () => {
+      const { token, checkoutUrl, sourceIdentifier } =
+        await postJSON(SESSION_ENDPOINT, { payment_request: initialPaymentRequest });
+      session.completeSessionRequest({ token, checkoutUrl, sourceIdentifier });
+    });
+
+    // Address chosen -> offer shipping methods
+    session.addEventListener("shippingaddresschanged", (ev) => {
+      const canShip = ev.shippingAddress.countryCode === "US";
+      const updatedPaymentRequest = window.ShopPay.PaymentRequest.build({
+        ...session.paymentRequest,
+        deliveryMethods: canShip ? SHIPPING_OPTIONS : [],
+      });
+      session.completeShippingAddressChange({
+        updatedPaymentRequest,
+        errors: canShip ? [] : [{
+          type: "shippingAddressError",
+          message: "We only ship to the US. Please choose a different address.",
+        }],
+      });
+    });
+
+    // Shipping method chosen -> update totals
+    session.addEventListener("deliverymethodchanged", (ev) => {
+      const method = ev.deliveryMethod;
+      const shipping = method ? method.amount.amount : 0;
+      const updatedPaymentRequest = window.ShopPay.PaymentRequest.build({
+        ...session.paymentRequest,
+        shippingLines: method
+          ? [{ label: method.label, code: method.code, amount: method.amount }]
+          : [],
+        totalShippingPrice: { finalTotal: money(shipping) },
+        total: money(SUBTOTAL + TAX + shipping),
+      });
+      session.completeDeliveryMethodChange({ updatedPaymentRequest });
+    });
+
+    // Customer clicked "Pay now" -> validate + submit on server
+    session.addEventListener("paymentconfirmationrequested", async () => {
+      try {
+        const data = await postJSON(SUBMIT_ENDPOINT, {
+          token: session.token,
+          payment_request: session.paymentRequest,
+        });
+        if (data.errors) {
+          session.completePaymentConfirmationRequest({
+            errors: [{ type: "generalError", message: "Something went wrong. Please try again." }],
+          });
+        } else {
+          session.completePaymentConfirmationRequest();
+        }
+      } catch (e) {
+        session.completePaymentConfirmationRequest({
+          errors: [{ type: "generalError", message: "Network error. Please try again." }],
+        });
+      }
+    });
+
+    // Payment succeeded
+    session.addEventListener("paymentcomplete", (ev) => {
+      console.log("Payment status:", ev.processingStatus.status);
+      session.close();
+      window.location.href = "/thank-you";
+    });
+
+    // Payment failed (don't close — buyer can retry with another method)
+    session.addEventListener("paymentattemptfailed", (ev) => {
+      console.warn("Payment attempt failed:", ev.error.reason, ev.error.errorCode);
+    });
+
+    session.addEventListener("windowclosed", () => {
+      console.log("Shop Pay window closed");
+    });
+  </script>
+</body>
+</html>
